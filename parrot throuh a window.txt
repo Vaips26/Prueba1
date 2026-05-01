@@ -1,0 +1,161 @@
+import cv2
+import numpy as np
+from pyparrot.Bebop import Bebop
+from pyparrot.DroneVision import DroneVision
+from pyparrot.Model import Model
+import time
+
+# Crear objeto Bebop
+bebop = Bebop()
+
+# Conectar al Bebop
+success = bebop.connect(5)
+
+if success:
+    # Despegar el dron
+    print("Despegando ...")
+    bebop.safe_takeoff(timeout=10)  # Timeout de 10 segundos
+
+    # Elevar un poco (subir 1 metro, por ejemplo)
+    print("Subiendo ...")
+    bebop.fly_direct(roll=0, pitch=0, yaw=0, vertical_movement=20, duration=3)
+
+    # Mantener el dron en esa posición por unos segundos
+    time.sleep(2)
+
+    # Estabilización manual después del despegue
+    stabilize_manually(bebop)
+
+    # Configurar la visión del dron
+    bebopVision = DroneVision(bebop, Model.BEBOP)
+
+    # Contador de frames
+    frame_count = 0
+    frame_skip = 2  # Procesar cada 2 frames
+
+    # Función de callback para procesar los frames del video
+    def display_video_frame(args):
+        global frame_count
+
+        frame_count += 1
+        if frame_count % frame_skip != 0:
+            return True  # Saltar este frame
+
+        try:
+            img = bebopVision.get_latest_valid_picture()
+
+            # Validar si se obtuvo la imagen
+            if img is None:
+                print("Error: No se pudo obtener la imagen del dron.")
+                return True
+
+            # Verificar el tamaño y las dimensiones de la imagen
+            if len(img.shape) != 3:
+                print(f"Error: Formato de imagen incorrecto, dimensiones: {img.shape}")
+                return True
+
+            # Reducir la resolución de la imagen para disminuir la carga de procesamiento
+            img = cv2.resize(img, (320, 240))
+
+            # Convertir la imagen a espacio de color HSV para la detección inicial
+            hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
+
+            # Definir los límites para el color naranja en el espacio HSV
+            lower_orange = np.array([0, 70, 50])
+            upper_orange = np.array([20, 255, 255])
+            lower_orange_alt = np.array([10, 70, 50])  # Añadir un rango alternativo
+            upper_orange_alt = np.array([25, 255, 255])  # Añadir un rango alternativo
+
+            # Crear máscaras para los píxeles que caen dentro de los rangos de naranja
+            mask1 = cv2.inRange(hsv, lower_orange, upper_orange)
+            mask2 = cv2.inRange(hsv, lower_orange_alt, upper_orange_alt)
+            mask = cv2.bitwise_or(mask1, mask2)
+
+            # Realizar operaciones morfológicas básicas
+            kernel = np.ones((5, 5), np.uint8)  # Aumentar el tamaño del kernel
+            mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel)
+            mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel)
+
+            # Encontrar contornos en la máscara
+            contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+            contours = sorted(contours, key=cv2.contourArea, reverse=True)[:1]  # Analizar solo el contorno más grande
+
+            # Dibujar los contornos y el centroide en la imagen
+            for contour in contours:
+                area = cv2.contourArea(contour)
+                if area > 500:  # Ajustar área mínima para facilitar la detección
+                    x, y, w, h = cv2.boundingRect(contour)
+                    cv2.rectangle(img, (x, y), (x + w, y + h), (0, 255, 0), 2)
+
+                    # Calcular el centroide del contorno
+                    centroid_x = x + w // 2
+                    centroid_y = y + h // 2
+                    cv2.circle(img, (centroid_x, centroid_y), 5, (0, 0, 255), -1)
+
+                    # Mover el dron según la posición del centroide
+                    move_drone_based_on_centroid(centroid_x, centroid_y, img.shape[1], img.shape[0])
+
+            # Mostrar el video con las detecciones o seguimiento
+            cv2.imshow("Detección de ventanas naranjas", img)
+
+            # Salir del bucle si se presiona 'q'
+            if cv2.waitKey(1) & 0xFF == ord('q'):
+                bebopVision.close_video()
+                bebop.disconnect()
+                cv2.destroyAllWindows()
+                return False
+
+        except Exception as e:
+            print(f"Error capturando o procesando el frame: {e}")
+
+        return True
+
+    # Mover el dron basado en la posición del centroide
+    def move_drone_based_on_centroid(centroid_x, centroid_y, width, height):
+        # Movimiento horizontal
+        if centroid_x > width // 2 + 30:
+            print("Moviendo a la derecha")
+            bebop.fly_direct(roll=15, pitch=0, yaw=0, vertical_movement=0, duration=1)
+        elif centroid_x < width // 2 - 30:
+            print("Moviendo a la izquierda")
+            bebop.fly_direct(roll=-15, pitch=0, yaw=0, vertical_movement=0, duration=1)
+        else:
+            print("Centrado horizontalmente")
+
+            # Cuando está centrado horizontalmente, avanzar hacia adelante inmediatamente
+            print("Avanzando hacia adelante")
+            bebop.fly_direct(roll=0, pitch=50, yaw=0, vertical_movement=0, duration=2)
+
+    # Estabilización manual después del despegue
+    def stabilize_manually(bebop):
+        print("Estabilizando...")
+        # Realiza ajustes en roll y pitch hasta estabilizar
+        for _ in range(10):  # Ajustes por 10 iteraciones
+            # Aquí puedes implementar la lógica para ajustar la estabilización.
+            # Por ejemplo, ajustar el roll y el pitch según la posición actual:
+            # Si el dron está desviado hacia la izquierda, ajustar el roll hacia la derecha y viceversa.
+
+            # Movimiento de estabilización, ajustando ligeramente
+            bebop.fly_direct(roll=0, pitch=0, yaw=0, vertical_movement=0, duration=0.5)
+            bebop.smart_sleep(0.5)  # Espera un momento antes de ajustar de nuevo
+
+    # Configurar la función de callback
+    bebopVision.set_user_callback_function(display_video_frame, user_callback_args=None)
+
+    # Iniciar la transmisión de video
+    success = bebopVision.open_video()
+
+    if success:
+        print("Transmisión de video iniciada con éxito.")
+        print("Presiona 'q' para cerrar la ventana de video.")
+
+        # Mantener la ventana abierta hasta que se presione 'q'
+        while True:
+            bebop.smart_sleep(1)  # Mantener el hilo vivo y permitir que se actualicen los frames
+    else:
+        print("No se pudo iniciar la transmisión de video.")
+
+    # Desconectar el dron (esto no se alcanzará a menos que se presione 'q')
+    bebop.disconnect()
+else:
+    print("Error al conectar con el Bebop.")
